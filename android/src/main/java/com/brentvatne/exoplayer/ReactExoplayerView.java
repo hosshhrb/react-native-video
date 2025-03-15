@@ -136,6 +136,7 @@ import com.google.ads.interactivemedia.v3.api.AdEvent;
 import com.google.ads.interactivemedia.v3.api.ImaSdkFactory;
 import com.google.ads.interactivemedia.v3.api.ImaSdkSettings;
 import com.google.common.collect.ImmutableList;
+import com.brentvatne.exoplayer.AdAnalyticsLogger;
 
 import java.net.CookieHandler;
 import java.net.CookieManager;
@@ -270,9 +271,6 @@ public class ReactExoplayerView extends FrameLayout implements
     private final String instanceId = String.valueOf(UUID.randomUUID());
 
     private CmcdConfiguration.Factory cmcdConfigurationFactory;
-
-    private AdReplacementManager adReplacementManager;
-    private AdReplacementMediaSourceFactory adReplacementMediaSourceFactory;
 
     public void setCmcdConfigurationFactory(CmcdConfiguration.Factory factory) {
         this.cmcdConfigurationFactory = factory;
@@ -909,20 +907,13 @@ public class ReactExoplayerView extends FrameLayout implements
                 adsLoader = imaLoaderBuilder.build();
                 adsLoader.setPlayer(player);
                 if (adsLoader != null) {
-                    // Initialize the ad replacement factory if needed
-                    if (adReplacementMediaSourceFactory == null) {
-                        adReplacementMediaSourceFactory = new AdReplacementMediaSourceFactory(mediaDataSourceFactory, themedReactContext);
-                    }
-                    
+                    DefaultMediaSourceFactory mediaSourceFactory = new DefaultMediaSourceFactory(mediaDataSourceFactory)
+                            .setLocalAdInsertionComponents(unusedAdTagUri -> adsLoader, exoPlayerView);
                     DataSpec adTagDataSpec = new DataSpec(adTagUrl);
-                    
-                    // Use our custom factory to create the AdsMediaSource
-                    return adReplacementMediaSourceFactory.createAdsMediaSource(
-                            videoSource,
+                    return new AdsMediaSource(videoSource,
                             adTagDataSpec,
                             ImmutableList.of(uri, adTagUrl),
-                            adsLoader,
-                            exoPlayerView);
+                            mediaSourceFactory, adsLoader, exoPlayerView);
                 }
             }
         }
@@ -1134,7 +1125,6 @@ public class ReactExoplayerView extends FrameLayout implements
         if (uri == null) {
             throw new IllegalStateException("Invalid video uri");
         }
-        
         int type;
         if ("rtsp".equals(overrideExtension)) {
             type = CONTENT_TYPE_RTSP;
@@ -1173,21 +1163,6 @@ public class ReactExoplayerView extends FrameLayout implements
             drmProvider = new DefaultDrmSessionManagerProvider();
         }
 
-        MediaItem mediaItem = mediaItemBuilder.setStreamKeys(streamKeys).build();
-
-        // Check if this is an ad media item that should be replaced
-        if (mediaItem.localConfiguration != null && 
-            mediaItem.localConfiguration.adsConfiguration != null &&
-            mediaItem.localConfiguration.adsConfiguration.adTagUri != null) {
-            
-            // Initialize the ad replacement factory if needed
-            if (adReplacementMediaSourceFactory == null) {
-                adReplacementMediaSourceFactory = new AdReplacementMediaSourceFactory(mediaDataSourceFactory, themedReactContext);
-            }
-            
-            // Use our custom factory for ad content
-            return adReplacementMediaSourceFactory.createMediaSource(mediaItem);
-        }
 
         switch (type) {
             case CONTENT_TYPE_SS:
@@ -1267,6 +1242,7 @@ public class ReactExoplayerView extends FrameLayout implements
             );
         }
 
+        MediaItem mediaItem = mediaItemBuilder.setStreamKeys(streamKeys).build();
         MediaSource mediaSource = mediaSourceFactory
                 .setDrmSessionManagerProvider(drmProvider)
                 .setLoadErrorHandlingPolicy(
@@ -2565,8 +2541,7 @@ public class ReactExoplayerView extends FrameLayout implements
 
     @Override
     public void onAdEvent(AdEvent adEvent) {
-        // Log the ad event
-        DebugLog.i(TAG, "Ad event: " + adEvent.getType());
+        AdAnalyticsLogger.getInstance().logAdEvent(adEvent);
 
         if (adEvent.getAdData() != null) {
             eventEmitter.onReceiveAdEvent.invoke(adEvent.getType().name(), adEvent.getAdData());
@@ -2577,8 +2552,7 @@ public class ReactExoplayerView extends FrameLayout implements
 
     @Override
     public void onAdError(AdErrorEvent adErrorEvent) {
-        // Log the ad error
-        DebugLog.e(TAG, "Ad error: " + adErrorEvent.getError().getMessage());
+        AdAnalyticsLogger.getInstance().logAdError(adErrorEvent);
 
         AdError error = adErrorEvent.getError();
         Map<String, String> errMap = Map.of(
@@ -2592,23 +2566,5 @@ public class ReactExoplayerView extends FrameLayout implements
     public void setControlsStyles(ControlsConfig controlsStyles) {
         controlsConfig = controlsStyles;
         refreshControlsStyles();
-    }
-
-    /**
-     * Enable or disable local ad replacement
-     */
-    public void setLocalAdReplacementEnabled(boolean enabled) {
-        if (adReplacementMediaSourceFactory != null) {
-            adReplacementMediaSourceFactory.setAdReplacementEnabled(enabled);
-        }
-    }
-
-    /**
-     * Set a custom URI for the local ad video
-     */
-    public void setLocalAdUri(Uri uri) {
-        if (adReplacementMediaSourceFactory != null) {
-            adReplacementMediaSourceFactory.setLocalAdUri(uri);
-        }
     }
 }
