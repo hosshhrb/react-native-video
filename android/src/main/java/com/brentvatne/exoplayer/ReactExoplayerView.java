@@ -136,7 +136,6 @@ import com.google.ads.interactivemedia.v3.api.AdEvent;
 import com.google.ads.interactivemedia.v3.api.ImaSdkFactory;
 import com.google.ads.interactivemedia.v3.api.ImaSdkSettings;
 import com.google.common.collect.ImmutableList;
-import com.brentvatne.exoplayer.AdAnalyticsLogger;
 
 import java.net.CookieHandler;
 import java.net.CookieManager;

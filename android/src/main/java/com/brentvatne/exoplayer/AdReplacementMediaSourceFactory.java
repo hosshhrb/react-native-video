@@ -57,7 +57,7 @@ public class AdReplacementMediaSourceFactory {
             DataSpec adTagDataSpec,
             ImmutableList<Uri> adTagUris,
             AdsLoader adsLoader,
-            AdsMediaSource.AdsLoaderProvider adsLoaderProvider) {
+            Object adsLoaderProvider) {
             
         // Create the AdsMediaSource with the original factory for proper ad integration
         return new AdsMediaSource(
