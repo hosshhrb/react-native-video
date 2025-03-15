@@ -152,3 +152,30 @@ export enum AdEvent {
    */
   VOLUME_MUTED = 'VOLUME_MUTED',
 }
+
+/** 
+ * Ad configuration options
+ */
+export interface AdPropsOpts {
+  /**
+   * The URL that contains the VAST ad tag
+   */
+  adTagUrl: string;
+  
+  /**
+   * The language code to use for ads, following ISO 639. 
+   * If not specified, defaults to the system language on iOS and 'en' on Android.
+   */
+  adLanguage?: string;
+  
+  /**
+   * Path to a local video file to use instead of the ad served by the IMA SDK.
+   * This is particularly useful for testing ad experiences offline or for using cached ads.
+   * Only available on Android currently.
+   * 
+   * Android examples:
+   * - "file:///android_asset/local_ad.mp4" (from assets folder)
+   * - "file:///data/data/com.yourapp/files/local_ad.mp4" (from app's internal storage)
+   */
+  localAdPath?: string;
+}

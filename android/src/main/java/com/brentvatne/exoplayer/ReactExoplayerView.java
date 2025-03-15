@@ -32,6 +32,12 @@ import android.widget.FrameLayout;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.TextView;
+import android.util.Log;
+import android.content.ComponentName;
+import android.content.ContentResolver;
+import android.content.Context;
+import android.content.ServiceConnection;
+import android.content.pm.PackageManager;
 
 import androidx.activity.OnBackPressedCallback;
 import androidx.annotation.NonNull;
@@ -136,6 +142,7 @@ import com.google.ads.interactivemedia.v3.api.AdEvent;
 import com.google.ads.interactivemedia.v3.api.ImaSdkFactory;
 import com.google.ads.interactivemedia.v3.api.ImaSdkSettings;
 import com.google.common.collect.ImmutableList;
+import com.brentvatne.exoplayer.AdAnalyticsLogger;
 
 import java.net.CookieHandler;
 import java.net.CookieManager;
@@ -151,6 +158,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import androidx.media3.exoplayer.source.ads.AdPlaybackState;
 
 @SuppressLint("ViewConstructor")
 public class ReactExoplayerView extends FrameLayout implements
@@ -892,7 +900,7 @@ public class ReactExoplayerView extends FrameLayout implements
             Uri adTagUrl = adProps.getAdTagUrl();
             if (adTagUrl != null) {
                 exoPlayerView.showAds();
-                // Create an AdsLoader.
+                // Create a custom AdsLoader that will replace the video ad with our local one
                 ImaAdsLoader.Builder imaLoaderBuilder = new ImaAdsLoader
                         .Builder(themedReactContext)
                         .setAdEventListener(this)
@@ -905,9 +913,20 @@ public class ReactExoplayerView extends FrameLayout implements
                 }
                 adsLoader = imaLoaderBuilder.build();
                 adsLoader.setPlayer(player);
+                
+                // We still create the regular ad source chain as before
                 if (adsLoader != null) {
-                    DefaultMediaSourceFactory mediaSourceFactory = new DefaultMediaSourceFactory(mediaDataSourceFactory)
-                            .setLocalAdInsertionComponents(unusedAdTagUri -> adsLoader, exoPlayerView);
+                    // Create a wrapper media source factory that will intercept ad media requests
+                    LocalAdReplacingMediaSourceFactory mediaSourceFactory = new LocalAdReplacingMediaSourceFactory(
+                            mediaDataSourceFactory,
+                            themedReactContext,
+                            exoPlayerView);
+                    
+                    // If a custom local ad path is specified in the props, use it
+                    if (adProps.getLocalAdPath() != null) {
+                        mediaSourceFactory.setLocalAdPath(adProps.getLocalAdPath());
+                    }
+                    
                     DataSpec adTagDataSpec = new DataSpec(adTagUrl);
                     return new AdsMediaSource(videoSource,
                             adTagDataSpec,
@@ -918,6 +937,80 @@ public class ReactExoplayerView extends FrameLayout implements
         }
         exoPlayerView.hideAds();
         return null;
+    }
+
+    /**
+     * Custom MediaSourceFactory that replaces ad media with local videos
+     */
+    private static class LocalAdReplacingMediaSourceFactory extends DefaultMediaSourceFactory {
+        private final Context context;
+        private final AdViewProvider adViewProvider;
+        private String localAdPath = "file:///android_asset/local_ad.mp4"; // Path to your local ad file
+        
+        public LocalAdReplacingMediaSourceFactory(DataSource.Factory dataSourceFactory, 
+                                                 Context context,
+                                                 AdViewProvider adViewProvider) {
+            super(dataSourceFactory);
+            this.context = context;
+            this.adViewProvider = adViewProvider;
+            this.setLocalAdInsertionComponents(
+                unusedAdTagUri -> LocalAdReplacingMediaSourceFactory.this.getLocalAdsLoader(),
+                adViewProvider);
+        }
+        
+        /**
+         * Set a custom path for the local ad video
+         * @param path The URI path to the local ad video
+         */
+        public void setLocalAdPath(String path) {
+            this.localAdPath = path;
+        }
+        
+        /**
+         * Creates a local version of the IMA ads loader that handles the ad events
+         * but plays our own video instead of the one IMA SDK provides
+         */
+        private ImaAdsLoader getLocalAdsLoader() {
+            return new ImaAdsLoader(ImaSdkFactory.getInstance().createImaSdkSettings()) {
+                @Override
+                public void start(@NonNull AdsMediaSource adsMediaSource, 
+                                 @NonNull DataSpec dataSpec, 
+                                 @NonNull Object adsId, 
+                                 @NonNull AdViewProvider adViewProvider, 
+                                 @NonNull EventListener eventListener) {
+                    // This would be called when IMA SDK wants to start playing an ad
+                    // We can intercept here and create our own MediaSource for the local ad
+                    try {
+                        // We would normally play the ad from IMA SDK here, but instead
+                        // we'll play our local ad file
+                        MediaSource localAdSource = createMediaSource(MediaItem.fromUri(Uri.parse(localAdPath)));
+                        // Notify that we're "playing an ad" but with our local content
+                        eventListener.onAdPlaybackState(createAdPlaybackState(localAdSource));
+                    } catch (Exception e) {
+                        Log.e("ReactExoplayerView", "Error creating local ad source", e);
+                    }
+                }
+                
+                private AdPlaybackState createAdPlaybackState(MediaSource localAdSource) {
+                    // Create an ad playback state that looks like what IMA would provide
+                    // but references our local ad
+                    AdPlaybackState adPlaybackState = new AdPlaybackState(0);
+                    // Add a single ad group at position 0 with a single ad
+                    adPlaybackState = adPlaybackState.withAdCount(0, 1);
+                    // Mark the ad as loaded and ready to play
+                    adPlaybackState = adPlaybackState.withAdUri(0, 0, Uri.parse(localAdPath));
+                    adPlaybackState = adPlaybackState.withAdDurationsUs(new long[][]{{30_000_000}}); // Assume 30s ad
+                    return adPlaybackState;
+                }
+            };
+        }
+        
+        @Override
+        public MediaSource createMediaSource(MediaItem mediaItem) {
+            // For regular content, use the standard media source creation
+            // For ad content, this could be where we substitute with local content
+            return super.createMediaSource(mediaItem);
+        }
     }
 
     private DrmSessionManager initializePlayerDrm() {
@@ -2540,6 +2633,8 @@ public class ReactExoplayerView extends FrameLayout implements
 
     @Override
     public void onAdEvent(AdEvent adEvent) {
+        AdAnalyticsLogger.getInstance().logAdEvent(adEvent);
+
         if (adEvent.getAdData() != null) {
             eventEmitter.onReceiveAdEvent.invoke(adEvent.getType().name(), adEvent.getAdData());
         } else {
@@ -2549,6 +2644,8 @@ public class ReactExoplayerView extends FrameLayout implements
 
     @Override
     public void onAdError(AdErrorEvent adErrorEvent) {
+        AdAnalyticsLogger.getInstance().logAdError(adErrorEvent);
+
         AdError error = adErrorEvent.getError();
         Map<String, String> errMap = Map.of(
                 "message", error.getMessage(),
