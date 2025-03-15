@@ -25,6 +25,7 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.os.Message;
 import android.text.TextUtils;
+import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.accessibility.CaptioningManager;
@@ -32,12 +33,6 @@ import android.widget.FrameLayout;
 import android.widget.ImageButton;
 import android.widget.LinearLayout;
 import android.widget.TextView;
-import android.util.Log;
-import android.content.ComponentName;
-import android.content.ContentResolver;
-import android.content.Context;
-import android.content.ServiceConnection;
-import android.content.pm.PackageManager;
 
 import androidx.activity.OnBackPressedCallback;
 import androidx.annotation.NonNull;
@@ -158,7 +153,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import androidx.media3.exoplayer.source.ads.AdPlaybackState;
 
 @SuppressLint("ViewConstructor")
 public class ReactExoplayerView extends FrameLayout implements
@@ -278,6 +272,8 @@ public class ReactExoplayerView extends FrameLayout implements
     private final String instanceId = String.valueOf(UUID.randomUUID());
 
     private CmcdConfiguration.Factory cmcdConfigurationFactory;
+
+    private LocalAdMediaSourceFactory localAdMediaSourceFactory;
 
     public void setCmcdConfigurationFactory(CmcdConfiguration.Factory factory) {
         this.cmcdConfigurationFactory = factory;
@@ -900,7 +896,7 @@ public class ReactExoplayerView extends FrameLayout implements
             Uri adTagUrl = adProps.getAdTagUrl();
             if (adTagUrl != null) {
                 exoPlayerView.showAds();
-                // Create a custom AdsLoader that will replace the video ad with our local one
+                // Create an AdsLoader.
                 ImaAdsLoader.Builder imaLoaderBuilder = new ImaAdsLoader
                         .Builder(themedReactContext)
                         .setAdEventListener(this)
@@ -913,103 +909,134 @@ public class ReactExoplayerView extends FrameLayout implements
                 }
                 adsLoader = imaLoaderBuilder.build();
                 adsLoader.setPlayer(player);
-                
-                // We still create the regular ad source chain as before
                 if (adsLoader != null) {
-                    // Create a wrapper media source factory that will intercept ad media requests
-                    LocalAdReplacingMediaSourceFactory mediaSourceFactory = new LocalAdReplacingMediaSourceFactory(
-                            mediaDataSourceFactory,
+                    // Create a custom media source factory that will replace ads with local videos
+                    localAdMediaSourceFactory = new LocalAdMediaSourceFactory(
                             themedReactContext,
+                            mediaDataSourceFactory,
+                            adsLoader,
                             exoPlayerView);
-                    
-                    // If a custom local ad path is specified in the props, use it
-                    if (adProps.getLocalAdPath() != null) {
-                        mediaSourceFactory.setLocalAdPath(adProps.getLocalAdPath());
-                    }
                     
                     DataSpec adTagDataSpec = new DataSpec(adTagUrl);
                     return new AdsMediaSource(videoSource,
                             adTagDataSpec,
                             ImmutableList.of(uri, adTagUrl),
-                            mediaSourceFactory, adsLoader, exoPlayerView);
+                            localAdMediaSourceFactory, adsLoader, exoPlayerView);
                 }
             }
         }
         exoPlayerView.hideAds();
         return null;
     }
-
+    
     /**
-     * Custom MediaSourceFactory that replaces ad media with local videos
+     * Custom MediaSourceFactory that replaces ad content with local videos
      */
-    private static class LocalAdReplacingMediaSourceFactory extends DefaultMediaSourceFactory {
+    private static class LocalAdMediaSourceFactory extends DefaultMediaSourceFactory {
         private final Context context;
-        private final AdViewProvider adViewProvider;
-        private String localAdPath = "file:///android_asset/local_ad.mp4"; // Path to your local ad file
+        private final DataSource.Factory dataSourceFactory;
+        private final ImaAdsLoader adsLoader;
+        private final com.google.android.exoplayer2.ui.AdViewProvider adViewProvider;
+        private Uri localAdUri;
         
-        public LocalAdReplacingMediaSourceFactory(DataSource.Factory dataSourceFactory, 
-                                                 Context context,
-                                                 AdViewProvider adViewProvider) {
+        // HARDCODED PATHS - UNCOMMENT AND MODIFY THE ONE YOU WANT TO USE
+        
+        // Path for an asset in the assets folder (e.g., place your video in android/src/main/assets/)
+        private static final String HARDCODED_ASSET_PATH = "local_ad.mp4";
+        
+        // Path for a file on the file system (absolute path)
+        // private static final String HARDCODED_FILE_PATH = "/data/data/YOUR_PACKAGE_NAME/files/local_ad.mp4";
+        
+        public LocalAdMediaSourceFactory(Context context, DataSource.Factory dataSourceFactory, 
+                ImaAdsLoader adsLoader, com.google.android.exoplayer2.ui.AdViewProvider adViewProvider) {
             super(dataSourceFactory);
             this.context = context;
+            this.dataSourceFactory = dataSourceFactory;
+            this.adsLoader = adsLoader;
             this.adViewProvider = adViewProvider;
-            this.setLocalAdInsertionComponents(
-                unusedAdTagUri -> LocalAdReplacingMediaSourceFactory.this.getLocalAdsLoader(),
-                adViewProvider);
+            
+            // USE HARDCODED ASSET PATH
+            this.localAdUri = Uri.parse("asset:///" + HARDCODED_ASSET_PATH);
+            
+            // OR USE HARDCODED FILE PATH (uncomment below and comment out the line above)
+            // this.localAdUri = Uri.parse("file://" + HARDCODED_FILE_PATH);
         }
         
         /**
-         * Set a custom path for the local ad video
-         * @param path The URI path to the local ad video
+         * Set the local video to use as a replacement for ads from assets folder
+         * This method can still be used if you want to override the hardcoded path programmatically
+         * @param assetPath Path to the video in the assets folder
          */
-        public void setLocalAdPath(String path) {
-            this.localAdPath = path;
+        public void setLocalAdFromAsset(String assetPath) {
+            this.localAdUri = Uri.parse("asset:///" + assetPath);
         }
         
         /**
-         * Creates a local version of the IMA ads loader that handles the ad events
-         * but plays our own video instead of the one IMA SDK provides
+         * Set the local video to use as a replacement for ads from file system
+         * This method can still be used if you want to override the hardcoded path programmatically
+         * @param filePath Path to the video file in the file system
          */
-        private ImaAdsLoader getLocalAdsLoader() {
-            return new ImaAdsLoader(ImaSdkFactory.getInstance().createImaSdkSettings()) {
-                @Override
-                public void start(@NonNull AdsMediaSource adsMediaSource, 
-                                 @NonNull DataSpec dataSpec, 
-                                 @NonNull Object adsId, 
-                                 @NonNull AdViewProvider adViewProvider, 
-                                 @NonNull EventListener eventListener) {
-                    // This would be called when IMA SDK wants to start playing an ad
-                    // We can intercept here and create our own MediaSource for the local ad
-                    try {
-                        // We would normally play the ad from IMA SDK here, but instead
-                        // we'll play our local ad file
-                        MediaSource localAdSource = createMediaSource(MediaItem.fromUri(Uri.parse(localAdPath)));
-                        // Notify that we're "playing an ad" but with our local content
-                        eventListener.onAdPlaybackState(createAdPlaybackState(localAdSource));
-                    } catch (Exception e) {
-                        Log.e("ReactExoplayerView", "Error creating local ad source", e);
-                    }
-                }
-                
-                private AdPlaybackState createAdPlaybackState(MediaSource localAdSource) {
-                    // Create an ad playback state that looks like what IMA would provide
-                    // but references our local ad
-                    AdPlaybackState adPlaybackState = new AdPlaybackState(0);
-                    // Add a single ad group at position 0 with a single ad
-                    adPlaybackState = adPlaybackState.withAdCount(0, 1);
-                    // Mark the ad as loaded and ready to play
-                    adPlaybackState = adPlaybackState.withAdUri(0, 0, Uri.parse(localAdPath));
-                    adPlaybackState = adPlaybackState.withAdDurationsUs(new long[][]{{30_000_000}}); // Assume 30s ad
-                    return adPlaybackState;
-                }
-            };
+        public void setLocalAdFromFile(String filePath) {
+            this.localAdUri = Uri.parse("file://" + filePath);
         }
         
         @Override
         public MediaSource createMediaSource(MediaItem mediaItem) {
-            // For regular content, use the standard media source creation
-            // For ad content, this could be where we substitute with local content
+            if (mediaItem.localConfiguration != null &&
+                    mediaItem.localConfiguration.uri.toString().contains("ad")) {
+                // This is an ad, replace with local content
+                MediaItem localAdMediaItem = new MediaItem.Builder()
+                        .setUri(localAdUri)
+                        .build();
+                
+                // Log that we're replacing an ad
+                Log.d("ReactExoplayerView", "Replacing ad with local video: " + localAdUri);
+                
+                // Use appropriate factory based on the URI scheme
+                if (localAdUri.toString().startsWith("asset:")) {
+                    // For assets, we need a custom asset data source factory
+                    return new ProgressiveMediaSource.Factory(
+                            new AssetDataSourceFactory(context))
+                            .createMediaSource(localAdMediaItem);
+                } else {
+                    // For regular files, use the default data source factory
+                    return super.createMediaSource(localAdMediaItem);
+                }
+            }
+            
+            // For non-ad content, use the default implementation
             return super.createMediaSource(mediaItem);
+        }
+        
+        @Override
+        public SupportedFormats getSupportedFormats() {
+            return super.getSupportedFormats();
+        }
+        
+        @Override
+        public MediaSourceFactory setDrmSessionManagerProvider(DrmSessionManagerProvider drmSessionManagerProvider) {
+            return super.setDrmSessionManagerProvider(drmSessionManagerProvider);
+        }
+        
+        @Override
+        public MediaSourceFactory setLoadErrorHandlingPolicy(LoadErrorHandlingPolicy loadErrorHandlingPolicy) {
+            return super.setLoadErrorHandlingPolicy(loadErrorHandlingPolicy);
+        }
+    }
+    
+    /**
+     * Factory for creating DataSource to read from assets folder
+     */
+    private static class AssetDataSourceFactory implements DataSource.Factory {
+        private final Context context;
+        
+        public AssetDataSourceFactory(Context context) {
+            this.context = context;
+        }
+        
+        @Override
+        public DataSource createDataSource() {
+            return new AssetDataSource(context);
         }
     }
 
@@ -2658,5 +2685,25 @@ public class ReactExoplayerView extends FrameLayout implements
     public void setControlsStyles(ControlsConfig controlsStyles) {
         controlsConfig = controlsStyles;
         refreshControlsStyles();
+    }
+
+    /**
+     * Set the local video from assets to use as a replacement for ads
+     * @param assetPath Path to the video in the assets folder
+     */
+    public void setLocalAdFromAsset(String assetPath) {
+        if (localAdMediaSourceFactory != null) {
+            localAdMediaSourceFactory.setLocalAdFromAsset(assetPath);
+        }
+    }
+    
+    /**
+     * Set the local video from file system to use as a replacement for ads
+     * @param filePath Path to the video file in the file system
+     */
+    public void setLocalAdFromFile(String filePath) {
+        if (localAdMediaSourceFactory != null) {
+            localAdMediaSourceFactory.setLocalAdFromFile(filePath);
+        }
     }
 }

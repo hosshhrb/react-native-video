@@ -8,22 +8,19 @@ import com.facebook.react.bridge.ReadableMap
 class AdsProps {
     var adTagUrl: Uri? = null
     var adLanguage: String? = null
-    var localAdPath: String? = null
 
     /** return true if this and src are equals  */
     override fun equals(other: Any?): Boolean {
         if (other == null || other !is AdsProps) return false
         return (
             adTagUrl == other.adTagUrl &&
-                adLanguage == other.adLanguage &&
-                localAdPath == other.localAdPath
+                adLanguage == other.adLanguage
             )
     }
 
     companion object {
         private const val PROP_AD_TAG_URL = "adTagUrl"
         private const val PROP_AD_LANGUAGE = "adLanguage"
-        private const val PROP_LOCAL_AD_PATH = "localAdPath"
 
         @JvmStatic
         fun parse(src: ReadableMap?): AdsProps {
@@ -38,10 +35,6 @@ class AdsProps {
                 val languageString = ReactBridgeUtils.safeGetString(src, PROP_AD_LANGUAGE)
                 if (!TextUtils.isEmpty(languageString)) {
                     adsProps.adLanguage = languageString
-                }
-                val localAdPathString = ReactBridgeUtils.safeGetString(src, PROP_LOCAL_AD_PATH)
-                if (!TextUtils.isEmpty(localAdPathString)) {
-                    adsProps.localAdPath = localAdPathString
                 }
             }
             return adsProps
