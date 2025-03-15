@@ -3,6 +3,7 @@ package com.brentvatne.exoplayer;
 import android.content.Context;
 import android.content.res.AssetManager;
 import android.net.Uri;
+import android.util.Log;
 
 import androidx.annotation.Nullable;
 
@@ -23,6 +24,7 @@ import java.util.Map;
  */
 public final class AssetDataSource extends BaseDataSource {
 
+    private static final String TAG = "AssetDataSource";
     private final Context context;
     private final AssetManager assetManager;
 
@@ -48,9 +50,17 @@ public final class AssetDataSource extends BaseDataSource {
     public long open(DataSpec dataSpec) throws IOException {
         try {
             uri = dataSpec.uri;
-            transferInitializing(dataSpec);
-
             String assetPath = uri.toString().replace("asset:///", "");
+            Log.d(TAG, "Opening asset: " + assetPath);
+            
+            // Call the appropriate transferring method based on what's available
+            try {
+                transferInitializing(dataSpec);
+            } catch (NoSuchMethodError e) {
+                // Older ExoPlayer versions might not have this method
+                Log.d(TAG, "transferInitializing not available");
+            }
+
             inputStream = assetManager.open(assetPath, AssetManager.ACCESS_RANDOM);
             long skipped = inputStream.skip(dataSpec.position);
             if (skipped < dataSpec.position) {
@@ -70,7 +80,13 @@ public final class AssetDataSource extends BaseDataSource {
         }
 
         opened = true;
-        transferStarted(dataSpec);
+        try {
+            transferStarted(dataSpec);
+        } catch (NoSuchMethodError e) {
+            // Older ExoPlayer versions might not have this method
+            Log.d(TAG, "transferStarted not available");
+        }
+        
         return bytesRemaining;
     }
 
@@ -97,7 +113,13 @@ public final class AssetDataSource extends BaseDataSource {
             bytesRemaining -= bytesRead;
         }
 
-        bytesTransferred(bytesRead);
+        try {
+            bytesTransferred(bytesRead);
+        } catch (NoSuchMethodError e) {
+            // Older ExoPlayer versions might not have this method
+            // We can safely ignore this
+        }
+        
         return bytesRead;
     }
 
@@ -118,7 +140,12 @@ public final class AssetDataSource extends BaseDataSource {
             inputStream = null;
             if (opened) {
                 opened = false;
-                transferEnded();
+                try {
+                    transferEnded();
+                } catch (NoSuchMethodError e) {
+                    // Older ExoPlayer versions might not have this method
+                    Log.d(TAG, "transferEnded not available");
+                }
             }
         }
     }
