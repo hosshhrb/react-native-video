@@ -272,6 +272,8 @@ public class ReactExoplayerView extends FrameLayout implements
 
     private CmcdConfiguration.Factory cmcdConfigurationFactory;
 
+    private LocalAdManager localAdManager;
+
     public void setCmcdConfigurationFactory(CmcdConfiguration.Factory factory) {
         this.cmcdConfigurationFactory = factory;
     }
@@ -328,6 +330,9 @@ public class ReactExoplayerView extends FrameLayout implements
             this.pictureInPictureParamsBuilder = new PictureInPictureParams.Builder();
         }
         mainHandler = new Handler();
+
+        // Initialize the local ad manager
+        this.localAdManager = new LocalAdManager(context);
 
         createViews();
 
@@ -907,13 +912,18 @@ public class ReactExoplayerView extends FrameLayout implements
                 adsLoader = imaLoaderBuilder.build();
                 adsLoader.setPlayer(player);
                 if (adsLoader != null) {
-                    DefaultMediaSourceFactory mediaSourceFactory = new DefaultMediaSourceFactory(mediaDataSourceFactory)
-                            .setLocalAdInsertionComponents(unusedAdTagUri -> adsLoader, exoPlayerView);
+                    // Use our custom media source factory instead of DefaultMediaSourceFactory
+                    CustomMediaSourceFactory customMediaSourceFactory = new CustomMediaSourceFactory(mediaDataSourceFactory, themedReactContext);
                     DataSpec adTagDataSpec = new DataSpec(adTagUrl);
-                    return new AdsMediaSource(videoSource,
+                    
+                    // Create an AdsMediaSource that will use our custom factory to replace ad content
+                    return new AdsMediaSource(
+                            videoSource,
                             adTagDataSpec,
                             ImmutableList.of(uri, adTagUrl),
-                            mediaSourceFactory, adsLoader, exoPlayerView);
+                            customMediaSourceFactory,
+                            adsLoader,
+                            exoPlayerView);
                 }
             }
         }
@@ -2566,5 +2576,23 @@ public class ReactExoplayerView extends FrameLayout implements
     public void setControlsStyles(ControlsConfig controlsStyles) {
         controlsConfig = controlsStyles;
         refreshControlsStyles();
+    }
+
+    /**
+     * Enable or disable local ad replacement
+     */
+    public void setLocalAdReplacementEnabled(boolean enabled) {
+        if (localAdManager != null) {
+            localAdManager.setEnabled(enabled);
+        }
+    }
+
+    /**
+     * Set a custom URI for the local ad video
+     */
+    public void setLocalAdUri(Uri uri) {
+        if (localAdManager != null) {
+            localAdManager.setLocalAdUri(uri);
+        }
     }
 }
