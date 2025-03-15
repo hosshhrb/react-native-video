@@ -59,8 +59,6 @@ class ReactExoplayerViewManager(private val config: ReactExoplayerConfig) : View
         private const val PROP_SHOW_NOTIFICATION_CONTROLS = "showNotificationControls"
         private const val PROP_DEBUG = "debug"
         private const val PROP_CONTROLS_STYLES = "controlsStyles"
-        private const val PROP_LOCAL_AD_ASSET = "localAdAsset"
-        private const val PROP_LOCAL_AD_FILE = "localAdFile"
     }
 
     override fun getName(): String = REACT_CLASS
@@ -270,19 +268,5 @@ class ReactExoplayerViewManager(private val config: ReactExoplayerConfig) : View
     fun setControlsStyles(videoView: ReactExoplayerView, controlsStyles: ReadableMap?) {
         val controlsConfig = ControlsConfig.parse(controlsStyles)
         videoView.setControlsStyles(controlsConfig)
-    }
-
-    @ReactProp(name = PROP_LOCAL_AD_ASSET)
-    fun setLocalAdAsset(videoView: ReactExoplayerView, assetPath: String?) {
-        if (assetPath != null) {
-            videoView.setLocalAdFromAsset(assetPath)
-        }
-    }
-
-    @ReactProp(name = PROP_LOCAL_AD_FILE)
-    fun setLocalAdFile(videoView: ReactExoplayerView, filePath: String?) {
-        if (filePath != null) {
-            videoView.setLocalAdFromFile(filePath)
-        }
     }
 }

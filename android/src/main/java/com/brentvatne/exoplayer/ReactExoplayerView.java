@@ -25,7 +25,6 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.os.Message;
 import android.text.TextUtils;
-import android.util.Log;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.accessibility.CaptioningManager;
@@ -272,8 +271,6 @@ public class ReactExoplayerView extends FrameLayout implements
     private final String instanceId = String.valueOf(UUID.randomUUID());
 
     private CmcdConfiguration.Factory cmcdConfigurationFactory;
-
-    private LocalAdMediaSourceFactory localAdMediaSourceFactory;
 
     public void setCmcdConfigurationFactory(CmcdConfiguration.Factory factory) {
         this.cmcdConfigurationFactory = factory;
@@ -910,13 +907,8 @@ public class ReactExoplayerView extends FrameLayout implements
                 adsLoader = imaLoaderBuilder.build();
                 adsLoader.setPlayer(player);
                 if (adsLoader != null) {
-                    // Create a default media source factory with ad insertion
                     DefaultMediaSourceFactory mediaSourceFactory = new DefaultMediaSourceFactory(mediaDataSourceFactory)
                             .setLocalAdInsertionComponents(unusedAdTagUri -> adsLoader, exoPlayerView);
-                    
-                    // Set up ad interceptor to replace ad content
-                    setupAdReplacement();
-                    
                     DataSpec adTagDataSpec = new DataSpec(adTagUrl);
                     return new AdsMediaSource(videoSource,
                             adTagDataSpec,
@@ -928,84 +920,371 @@ public class ReactExoplayerView extends FrameLayout implements
         exoPlayerView.hideAds();
         return null;
     }
-    
-    /**
-     * Set up ad replacement by intercepting the ad loading
-     * This approach uses event listeners instead of extending classes
-     */
-    private void setupAdReplacement() {
-        // Make sure we have a valid player
-        if (player == null) return;
-        
-        // Add a listener to detect when ads start playing
-        player.addListener(new Player.Listener() {
+
+    private DrmSessionManager initializePlayerDrm() {
+        DrmSessionManager drmSessionManager = null;
+        DRMProps drmProps = source.getDrmProps();
+        // need to realign UUID in DRM Props from source
+        if (drmProps != null && drmProps.getDrmType() != null) {
+            UUID uuid = Util.getDrmUuid(drmProps.getDrmType());
+            if (uuid != null) {
+                try {
+                    DebugLog.w(TAG, "drm buildDrmSessionManager");
+                    drmSessionManager = buildDrmSessionManager(uuid, drmProps);
+                } catch (UnsupportedDrmException e) {
+                    int errorStringId = Util.SDK_INT < 18 ? R.string.error_drm_not_supported
+                            : (e.reason == UnsupportedDrmException.REASON_UNSUPPORTED_SCHEME
+                            ? R.string.error_drm_unsupported_scheme : R.string.error_drm_unknown);
+                    eventEmitter.onVideoError.invoke(getResources().getString(errorStringId), e, "3003");
+                        }
+            }
+        }
+        return drmSessionManager;
+    }
+
+    private void initializePlayerSource(Source runningSource) {
+        if (runningSource.getUri() == null) {
+            return;
+        }
+        /// init DRM
+        DrmSessionManager drmSessionManager = initializePlayerDrm();
+        if (drmSessionManager == null && runningSource.getDrmProps() != null && runningSource.getDrmProps().getDrmType() != null) {
+            // Failed to initialize DRM session manager - cannot continue
+            DebugLog.e(TAG, "Failed to initialize DRM Session Manager Framework!");
+            return;
+        }
+        // init source to manage ads and external text tracks
+        MediaSource videoSource = buildMediaSource(runningSource.getUri(),
+                runningSource.getExtension(),
+                drmSessionManager,
+                runningSource.getCropStartMs(),
+                runningSource.getCropEndMs());
+        MediaSource mediaSourceWithAds = initializeAds(videoSource, runningSource);
+        MediaSource mediaSource = Objects.requireNonNullElse(mediaSourceWithAds, videoSource);
+
+        MediaSource subtitlesSource = buildTextSource();
+        if (subtitlesSource != null) {
+            MediaSource[] mediaSourceArray = {mediaSource, subtitlesSource};
+            mediaSource = new MergingMediaSource(mediaSourceArray);
+        }
+
+        // wait for player to be set
+        while (player == null) {
+            try {
+                wait();
+            } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                DebugLog.e(TAG, ex.toString());
+            }
+        }
+
+        boolean haveResumePosition = resumeWindow != C.INDEX_UNSET;
+        if (haveResumePosition) {
+            player.seekTo(resumeWindow, resumePosition);
+            player.setMediaSource(mediaSource, false);
+        } else if (runningSource.getStartPositionMs() > 0) {
+            player.setMediaSource(mediaSource, runningSource.getStartPositionMs());
+        } else {
+            player.setMediaSource(mediaSource, true);
+        }
+        player.prepare();
+        playerNeedsSource = false;
+
+        reLayoutControls();
+
+        eventEmitter.onVideoLoadStart.invoke();
+        loadVideoStarted = true;
+
+        finishPlayerInitialization();
+    }
+
+    private void finishPlayerInitialization() {
+        // Initializing the playerControlView
+        initializePlayerControl();
+        setControls(controls);
+        applyModifiers();
+    }
+
+    private void setupPlaybackService() {
+        if (!showNotificationControls || player == null) {
+            return;
+        }
+
+        playbackServiceConnection = new ServiceConnection() {
             @Override
-            public void onIsPlayingChanged(boolean isPlaying) {
-                if (isPlaying && player.isPlayingAd()) {
-                    Log.d(TAG, "Ad playback detected - replacing with local ad");
-                    tryReplaceAdWithLocalVideo();
+            public void onServiceConnected(ComponentName name, IBinder service) {
+                playbackServiceBinder = (PlaybackServiceBinder) service;
+
+                try {
+                    Activity currentActivity = themedReactContext.getCurrentActivity();
+                    if (currentActivity != null) {
+                        playbackServiceBinder.getService().registerPlayer(player,
+                                (Class<Activity>) currentActivity.getClass());
+                    } else {
+                        // Handle the case where currentActivity is null
+                        DebugLog.w(TAG, "Could not register ExoPlayer: currentActivity is null");
+                    }
+                } catch (Exception e) {
+                    DebugLog.e(TAG, "Could not register ExoPlayer: " + e.getMessage());
                 }
             }
-        });
-    }
-    
-    /**
-     * Try to replace the currently playing ad with a local video
-     * This is called when an ad starts playing
-     */
-    private void tryReplaceAdWithLocalVideo() {
-        try {
-            // Save the current position and state
-            boolean wasPlaying = player.getPlayWhenReady();
-            
-            // Prepare local ad media source
-            Uri localAdUri = getLocalAdUri();
-            Log.d(TAG, "Replacing ad with local video: " + localAdUri);
-            
-            // Create a media item for the local ad
-            MediaItem localAdMediaItem = new MediaItem.Builder()
-                    .setUri(localAdUri)
-                    .build();
-            
-            // Create a media source for the local ad
-            MediaSource localAdSource;
-            if (localAdUri.toString().startsWith("asset:")) {
-                // For assets, we need a custom asset data source factory
-                localAdSource = new ProgressiveMediaSource.Factory(
-                        new AssetDataSourceFactory(themedReactContext))
-                        .createMediaSource(localAdMediaItem);
-            } else {
-                // For regular files
-                localAdSource = new ProgressiveMediaSource.Factory(mediaDataSourceFactory)
-                        .createMediaSource(localAdMediaItem);
+
+            @Override
+            public void onServiceDisconnected(ComponentName name) {
+                try {
+                    if (playbackServiceBinder != null) {
+                        playbackServiceBinder.getService().unregisterPlayer(player);
+                    }
+                } catch (Exception ignored) {}
+
+                playbackServiceBinder = null;
             }
 
-            // Get the current window index
-            int adWindowIndex = player.getCurrentWindowIndex();
-            
-            // Load the local ad
-            player.addMediaSource(adWindowIndex + 1, localAdSource);
-            player.seekTo(adWindowIndex + 1, 0);
-            player.setPlayWhenReady(wasPlaying);
-            
-            Log.d(TAG, "Local ad replacement complete");
-        } catch (Exception e) {
-            Log.e(TAG, "Error replacing ad with local video", e);
+            @Override
+            public void onNullBinding(ComponentName name) {
+                DebugLog.e(TAG, "Could not register ExoPlayer");
+            }
+        };
+
+        Intent intent = new Intent(themedReactContext, VideoPlaybackService.class);
+        intent.setAction(MediaSessionService.SERVICE_INTERFACE);
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            themedReactContext.startForegroundService(intent);
+        } else {
+            themedReactContext.startService(intent);
+        }
+
+        int flags;
+        if (Build.VERSION.SDK_INT >= 29) {
+            flags = Context.BIND_AUTO_CREATE | Context.BIND_INCLUDE_CAPABILITIES;
+        } else {
+            flags = Context.BIND_AUTO_CREATE;
+        }
+
+        themedReactContext.bindService(intent, playbackServiceConnection, flags);
+    }
+
+    private void cleanupPlaybackService() {
+        try {
+            if(player != null && playbackServiceBinder != null) {
+                playbackServiceBinder.getService().unregisterPlayer(player);
+            }
+
+            playbackServiceBinder = null;
+
+            if(playbackServiceConnection != null) {
+                themedReactContext.unbindService(playbackServiceConnection);
+            }
+        } catch(Exception e) {
+            DebugLog.w(TAG, "Cloud not cleanup playback service");
         }
     }
-    
-    /**
-     * Get the URI for the local ad video to play
-     */
-    private Uri getLocalAdUri() {
-        // HARDCODED PATH - MODIFY AS NEEDED
-        
-        // Path for an asset in the assets folder (e.g., place your video in android/src/main/assets/)
-        // You can use this line for assets:
-        return Uri.parse("asset:///local_ad.mp4");
-        
-        // Or use this line for a file on the file system (absolute path):
-        // return Uri.parse("file:///data/data/" + themedReactContext.getPackageName() + "/files/local_ad.mp4");
+
+    private DrmSessionManager buildDrmSessionManager(UUID uuid, DRMProps drmProps) throws UnsupportedDrmException {
+        return buildDrmSessionManager(uuid, drmProps, 0);
+    }
+
+    private DrmSessionManager buildDrmSessionManager(UUID uuid, DRMProps drmProps, int retryCount) throws UnsupportedDrmException {
+        if (Util.SDK_INT < 18) {
+            return null;
+        }
+        try {
+            HttpMediaDrmCallback drmCallback = new HttpMediaDrmCallback(drmProps.getDrmLicenseServer(),
+                    buildHttpDataSourceFactory(false));
+
+            String[] keyRequestPropertiesArray = drmProps.getDrmLicenseHeader();
+            for (int i = 0; i < keyRequestPropertiesArray.length - 1; i += 2) {
+                drmCallback.setKeyRequestProperty(keyRequestPropertiesArray[i], keyRequestPropertiesArray[i + 1]);
+            }
+            FrameworkMediaDrm mediaDrm = FrameworkMediaDrm.newInstance(uuid);
+            if (hasDrmFailed) {
+                // When DRM fails using L1 we want to switch to L3
+                mediaDrm.setPropertyString("securityLevel", "L3");
+            }
+            return new DefaultDrmSessionManager.Builder()
+                    .setUuidAndExoMediaDrmProvider(uuid, (_uuid) -> mediaDrm)
+                    .setKeyRequestParameters(null)
+                    .setMultiSession(drmProps.getMultiDrm())
+                    .build(drmCallback);
+        } catch (UnsupportedDrmException ex) {
+            // Unsupported DRM exceptions are handled by the calling method
+            throw ex;
+        } catch (Exception ex) {
+            if (retryCount < 3) {
+                // Attempt retry 3 times in case where the OS Media DRM Framework fails for whatever reason
+                return buildDrmSessionManager(uuid, drmProps, ++retryCount);
+            }
+            // Handle the unknow exception and emit to JS
+            eventEmitter.onVideoError.invoke(ex.toString(), ex, "3006");
+            return null;
+        }
+    }
+
+    private MediaSource buildMediaSource(Uri uri, String overrideExtension, DrmSessionManager drmSessionManager, long cropStartMs, long cropEndMs) {
+        if (uri == null) {
+            throw new IllegalStateException("Invalid video uri");
+        }
+        int type;
+        if ("rtsp".equals(overrideExtension)) {
+            type = CONTENT_TYPE_RTSP;
+        } else {
+            type = Util.inferContentType(!TextUtils.isEmpty(overrideExtension) ? "." + overrideExtension
+                    : uri.getLastPathSegment());
+        }
+        config.setDisableDisconnectError(this.disableDisconnectError);
+
+        MediaItem.Builder mediaItemBuilder = new MediaItem.Builder()
+                .setUri(uri);
+
+        // refresh custom Metadata
+        MediaMetadata customMetadata = ConfigurationUtils.buildCustomMetadata(source.getMetadata());
+        if (customMetadata != null) {
+            mediaItemBuilder.setMediaMetadata(customMetadata);
+        }
+        if (source.getAdsProps() != null) {
+            Uri adTagUrl = source.getAdsProps().getAdTagUrl();
+            if (adTagUrl != null) {
+                mediaItemBuilder.setAdsConfiguration(
+                        new MediaItem.AdsConfiguration.Builder(adTagUrl).build()
+                );
+            }
+        }
+
+        MediaItem.LiveConfiguration.Builder liveConfiguration = ConfigurationUtils.getLiveConfiguration(source.getBufferConfig());
+        mediaItemBuilder.setLiveConfiguration(liveConfiguration.build());
+
+        MediaSource.Factory mediaSourceFactory;
+        DrmSessionManagerProvider drmProvider;
+        List<StreamKey> streamKeys = new ArrayList<>();
+        if (drmSessionManager != null) {
+            drmProvider = ((_mediaItem) -> drmSessionManager);
+        } else {
+            drmProvider = new DefaultDrmSessionManagerProvider();
+        }
+
+
+        switch (type) {
+            case CONTENT_TYPE_SS:
+                if(!BuildConfig.USE_EXOPLAYER_SMOOTH_STREAMING) {
+                    DebugLog.e("Exo Player Exception", "Smooth Streaming is not enabled!");
+                    throw new IllegalStateException("Smooth Streaming is not enabled!");
+                }
+
+                mediaSourceFactory = new SsMediaSource.Factory(
+                        new DefaultSsChunkSource.Factory(mediaDataSourceFactory),
+                        buildDataSourceFactory(false)
+                );
+                break;
+            case CONTENT_TYPE_DASH:
+                if(!BuildConfig.USE_EXOPLAYER_DASH) {
+                    DebugLog.e("Exo Player Exception", "DASH is not enabled!");
+                    throw new IllegalStateException("DASH is not enabled!");
+                }
+
+                mediaSourceFactory = new DashMediaSource.Factory(
+                        new DefaultDashChunkSource.Factory(mediaDataSourceFactory),
+                        buildDataSourceFactory(false)
+                );
+                break;
+            case CONTENT_TYPE_HLS:
+                if (!BuildConfig.USE_EXOPLAYER_HLS) {
+                    DebugLog.e("Exo Player Exception", "HLS is not enabled!");
+                    throw new IllegalStateException("HLS is not enabled!");
+                }
+
+                DataSource.Factory dataSourceFactory = mediaDataSourceFactory;
+
+                if (useCache) {
+                    dataSourceFactory = RNVSimpleCache.INSTANCE.getCacheFactory(buildHttpDataSourceFactory(true));
+                }
+
+                mediaSourceFactory = new HlsMediaSource.Factory(
+                        dataSourceFactory
+                ).setAllowChunklessPreparation(source.getTextTracksAllowChunklessPreparation());
+                break;
+            case CONTENT_TYPE_OTHER:
+                if ("asset".equals(uri.getScheme())) {
+                    try {
+                        DataSource.Factory assetDataSourceFactory = DataSourceUtil.buildAssetDataSourceFactory(themedReactContext, uri);
+                        mediaSourceFactory = new ProgressiveMediaSource.Factory(assetDataSourceFactory);
+                    } catch (Exception e) {
+                        throw new IllegalStateException("cannot open input file:" + uri);
+                    }
+                } else if ("file".equals(uri.getScheme()) ||
+                        !useCache) {
+                    mediaSourceFactory = new ProgressiveMediaSource.Factory(
+                            mediaDataSourceFactory
+                    );
+                } else {
+                    mediaSourceFactory = new ProgressiveMediaSource.Factory(
+                            RNVSimpleCache.INSTANCE.getCacheFactory(buildHttpDataSourceFactory(true))
+                    );
+
+                }
+                break;
+            case CONTENT_TYPE_RTSP:
+                if (!BuildConfig.USE_EXOPLAYER_RTSP) {
+                    DebugLog.e("Exo Player Exception", "RTSP is not enabled!");
+                    throw new IllegalStateException("RTSP is not enabled!");
+                }
+
+                mediaSourceFactory = new RtspMediaSource.Factory();
+                break;
+            default: {
+                throw new IllegalStateException("Unsupported type: " + type);
+            }
+        }
+
+        if (cmcdConfigurationFactory != null) {
+            mediaSourceFactory = mediaSourceFactory.setCmcdConfigurationFactory(
+                    cmcdConfigurationFactory::createCmcdConfiguration
+            );
+        }
+
+        MediaItem mediaItem = mediaItemBuilder.setStreamKeys(streamKeys).build();
+        MediaSource mediaSource = mediaSourceFactory
+                .setDrmSessionManagerProvider(drmProvider)
+                .setLoadErrorHandlingPolicy(
+                        config.buildLoadErrorHandlingPolicy(source.getMinLoadRetryCount())
+                )
+                .createMediaSource(mediaItem);
+
+        if (cropStartMs >= 0 && cropEndMs >= 0) {
+            return new ClippingMediaSource(mediaSource, cropStartMs * 1000, cropEndMs * 1000);
+        } else if (cropStartMs >= 0) {
+            return new ClippingMediaSource(mediaSource, cropStartMs * 1000, TIME_END_OF_SOURCE);
+        } else if (cropEndMs >= 0) {
+            return new ClippingMediaSource(mediaSource, 0, cropEndMs * 1000);
+        }
+
+        return mediaSource;
+    }
+
+    @Nullable
+    private MediaSource buildTextSource() {
+        if (source.getSideLoadedTextTracks() == null) {
+            return null;
+        }
+
+        List<MediaItem.SubtitleConfiguration> subtitleConfigurations = new ArrayList<>();
+
+        for (SideLoadedTextTrack track : source.getSideLoadedTextTracks().getTracks()) {
+            MediaItem.SubtitleConfiguration subtitleConfiguration = new MediaItem.SubtitleConfiguration.Builder(track.getUri())
+                .setMimeType(track.getType())
+                .setLanguage(track.getLanguage())
+                .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
+                .setRoleFlags(C.ROLE_FLAG_SUBTITLE)
+                .setLabel(track.getTitle())
+                .build();
+            subtitleConfigurations.add(subtitleConfiguration);
+        }
+
+        MediaItem subtitlesMediaItem = new MediaItem.Builder()
+                .setUri(source.getUri())
+                .setSubtitleConfigurations(subtitleConfigurations).build();
+
+        return new DefaultMediaSourceFactory(mediaDataSourceFactory).createMediaSource(subtitlesMediaItem);
     }
 
     private void releasePlayer() {
@@ -2262,8 +2541,7 @@ public class ReactExoplayerView extends FrameLayout implements
 
     @Override
     public void onAdEvent(AdEvent adEvent) {
-        // Safely log ad events - removing AdAnalyticsLogger dependency
-        Log.d(TAG, "Ad event: " + adEvent.getType());
+        AdAnalyticsLogger.getInstance().logAdEvent(adEvent);
 
         if (adEvent.getAdData() != null) {
             eventEmitter.onReceiveAdEvent.invoke(adEvent.getType().name(), adEvent.getAdData());
@@ -2274,8 +2552,7 @@ public class ReactExoplayerView extends FrameLayout implements
 
     @Override
     public void onAdError(AdErrorEvent adErrorEvent) {
-        // Safely log ad errors - removing AdAnalyticsLogger dependency
-        Log.e(TAG, "Ad error: " + adErrorEvent.getError().getMessage());
+        AdAnalyticsLogger.getInstance().logAdError(adErrorEvent);
 
         AdError error = adErrorEvent.getError();
         Map<String, String> errMap = Map.of(
@@ -2289,23 +2566,5 @@ public class ReactExoplayerView extends FrameLayout implements
     public void setControlsStyles(ControlsConfig controlsStyles) {
         controlsConfig = controlsStyles;
         refreshControlsStyles();
-    }
-
-    /**
-     * Set the local video from assets to use as a replacement for ads
-     * @param assetPath Path to the video in the assets folder
-     */
-    public void setLocalAdFromAsset(String assetPath) {
-        // Not needed with our new implementation - uses hardcoded path
-        Log.d(TAG, "setLocalAdFromAsset is not used - using hardcoded path");
-    }
-    
-    /**
-     * Set the local video from file system to use as a replacement for ads
-     * @param filePath Path to the video file in the file system
-     */
-    public void setLocalAdFromFile(String filePath) {
-        // Not needed with our new implementation - uses hardcoded path
-        Log.d(TAG, "setLocalAdFromFile is not used - using hardcoded path");
     }
 }
